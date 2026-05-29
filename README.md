@@ -113,7 +113,7 @@ Quando `auto_mode.enabled = true`, as configurações de `node_groups` e `scalin
 | Ambiente | Bucket | Key |
 |---|---|---|
 | dev | `vtg-alexandre-terraform-state` | `eks-github-actions/terraform.tfstate` |
-| prod | `vtg-alexandre-terraform-state` | `eks/prod/terraform.tfstate` |
+| prod | `vtg-alexandre-terraform-state` | `eks-github-actions-prod/terraform.tfstate` |
 
 O bucket S3 precisa existir antes do `terraform init`. O lock de estado é gerenciado pelo próprio S3 (`use_lockfile = true`).
 
@@ -127,3 +127,118 @@ O bucket S3 precisa existir antes do `terraform init`. O lock de estado é geren
 | CNI | `vpc-cni` |
 | Kube Proxy | `kube-proxy` |
 | CoreDNS | `coredns` |
+
+---
+
+## CI/CD — GitHub Actions
+
+Os workflows estão em `.github/workflows/`:
+
+| Workflow | Trigger | Função |
+|---|---|---|
+| `ci.yml` | Pull Request → `main` | Validate + Security Scan + Plan (comentário no PR) |
+| `cd.yml` | Push em `main` ou dispatch manual | Plan + Deploy com gates de aprovação |
+
+### Fluxo completo
+
+```
+Pull Request
+  └── validate (dev + prod)   fmt, init -backend=false, validate, tflint
+  └── security (dev + prod)   Checkov + tfsec
+        └── plan-dev           terraform plan → comentário no PR
+        └── plan-prod          terraform plan → comentário no PR
+
+Merge em main
+  └── plan-dev
+        └── deploy-dev  [gate: Environment "dev"]
+              └── plan-prod
+                    └── deploy-prod  [gate: Environment "prod" + aprovação manual]
+```
+
+### Ferramentas de segurança (gratuitas)
+
+| Ferramenta | Foco | Action |
+|---|---|---|
+| [Checkov](https://github.com/bridgecrewio/checkov) | CIS, NIST, SOC2 — ampla cobertura IaC | `bridgecrewio/checkov-action@v12` |
+| [tfsec](https://github.com/aquasecurity/tfsec) | Regras específicas para Terraform/AWS | `aquasecurity/tfsec-action@v1.0.0` |
+
+---
+
+## Configuração do CI/CD (pré-requisitos)
+
+### 1 — Criar o OIDC Provider na AWS
+
+Executar **uma única vez** por conta AWS. Permite que o GitHub Actions assuma roles IAM sem credenciais estáticas.
+
+```bash
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+```
+
+### 2 — Criar as IAM Roles
+
+Criar uma role por ambiente (`eks-deploy-dev`, `eks-deploy-prod`) com a trust policy abaixo.
+Substitua `SEU-ORG` e `SEU-REPO` pelo org e repositório do GitHub.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:SEU-ORG/SEU-REPO:*"
+        }
+      }
+    }
+  ]
+}
+```
+
+> Para o ambiente `prod`, use um subject mais restrito:
+> `"repo:SEU-ORG/SEU-REPO:environment:prod"`
+
+### 3 — Secrets no GitHub
+
+**Repository secrets** (`Settings > Secrets and variables > Actions`):
+
+| Secret | Valor |
+|---|---|
+| `AWS_ROLE_ARN_DEV` | ARN da role dev — usado nos jobs de **plan** no CI |
+| `AWS_ROLE_ARN_PROD` | ARN da role prod — usado nos jobs de **plan** no CI |
+
+**Environment secrets** (`Settings > Environments > <env> > Secrets`):
+
+| Environment | Secret | Valor |
+|---|---|---|
+| `dev` | `AWS_ROLE_ARN` | ARN da role dev — usado no **deploy** |
+| `prod` | `AWS_ROLE_ARN` | ARN da role prod — usado no **deploy** |
+
+### 4 — Criar os Environments no GitHub
+
+Em `Settings > Environments`:
+
+- **`dev`** — adicione reviewers se quiser aprovação antes do deploy
+- **`prod`** — adicione **Required reviewers** para habilitar o gate de aprovação manual
+
+### 5 — Ajustar o `source` do módulo
+
+O path local `../../../Terraform-Collection/...` não funciona em runners de CI.
+Substitua pelo git URL do módulo nos arquivos `environments/*/main.tf`:
+
+```hcl
+module "eks" {
+  source = "git::https://github.com/SEU-ORG/iac-terraform-aws-eks.git?ref=v1.0.0"
+  # ...
+}
+```
