@@ -1,0 +1,242 @@
+name: "CD — Deploy"
+
+# Triggered automatically on push to main (when infrastructure files change)
+# or manually via workflow_dispatch to target a specific environment.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "environments/**"
+      - ".github/workflows/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Ambiente alvo"
+        type: choice
+        options: [all, dev, prod]
+        default: all
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+# Prevent concurrent deploys — a deploy in progress must finish before the next starts.
+concurrency:
+  group: terraform-deploy
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "~1.9"
+  AWS_REGION: "us-east-1"
+
+# Helper to resolve whether an environment should run.
+# On push: always runs both. On dispatch: runs only the selected one (or both if "all").
+# Usage: if env == '' (push) OR env == 'all' OR env == 'dev'  →  run dev
+#        if env == '' (push) OR env == 'all' OR env == 'prod' →  run prod
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────────
+  # STAGE 1a — Plan dev
+  # ──────────────────────────────────────────────────────────────────────────────
+  plan-dev:
+    name: "Plan · dev"
+    runs-on: ubuntu-latest
+    if: >
+      github.event.inputs.environment == '' ||
+      github.event.inputs.environment == 'all' ||
+      github.event.inputs.environment == 'dev'
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: environments/dev
+        run: terraform init
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: environments/dev
+        run: |
+          set +e
+          terraform plan -detailed-exitcode -out=plan.tfplan -no-color
+          PLAN_EXIT=$?
+          set -e
+          [ $PLAN_EXIT -eq 1 ] && exit 1
+          echo "has_changes=$([ $PLAN_EXIT -eq 2 ] && echo true || echo false)" >> $GITHUB_OUTPUT
+
+      - name: Plan Summary
+        if: steps.plan.outputs.has_changes == 'true'
+        working-directory: environments/dev
+        run: |
+          {
+            echo "## Terraform Plan — dev"
+            echo '```hcl'
+            terraform show -no-color plan.tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Plan
+        if: steps.plan.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-dev-${{ github.sha }}
+          path: environments/dev/plan.tfplan
+          retention-days: 1
+
+  # ──────────────────────────────────────────────────────────────────────────────
+  # STAGE 1b — Deploy dev
+  # Gate: GitHub Environment "dev" (configure required reviewers if desired)
+  # Uses environment-scoped secret: AWS_ROLE_ARN
+  # ──────────────────────────────────────────────────────────────────────────────
+  deploy-dev:
+    name: "Deploy · dev"
+    runs-on: ubuntu-latest
+    needs: plan-dev
+    if: needs.plan-dev.outputs.has_changes == 'true'
+    environment: dev   # << configure protection rules in: Settings > Environments > dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}   # environment-scoped secret
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: environments/dev
+        run: terraform init
+
+      - name: Download Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: plan-dev-${{ github.sha }}
+          path: environments/dev
+
+      - name: Terraform Apply
+        working-directory: environments/dev
+        run: terraform apply -auto-approve plan.tfplan
+
+  # ──────────────────────────────────────────────────────────────────────────────
+  # STAGE 2a — Plan prod
+  # Only runs after dev is deployed (or skipped when deploying prod only).
+  # ──────────────────────────────────────────────────────────────────────────────
+  plan-prod:
+    name: "Plan · prod"
+    runs-on: ubuntu-latest
+    needs: deploy-dev
+    if: >
+      always() &&
+      (needs.deploy-dev.result == 'success' || needs.deploy-dev.result == 'skipped') &&
+      (
+        github.event.inputs.environment == '' ||
+        github.event.inputs.environment == 'all' ||
+        github.event.inputs.environment == 'prod'
+      )
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: environments/prod
+        run: terraform init
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: environments/prod
+        run: |
+          set +e
+          terraform plan -detailed-exitcode -out=plan.tfplan -no-color
+          PLAN_EXIT=$?
+          set -e
+          [ $PLAN_EXIT -eq 1 ] && exit 1
+          echo "has_changes=$([ $PLAN_EXIT -eq 2 ] && echo true || echo false)" >> $GITHUB_OUTPUT
+
+      - name: Plan Summary
+        if: steps.plan.outputs.has_changes == 'true'
+        working-directory: environments/prod
+        run: |
+          {
+            echo "## Terraform Plan — prod"
+            echo '```hcl'
+            terraform show -no-color plan.tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Plan
+        if: steps.plan.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-prod-${{ github.sha }}
+          path: environments/prod/plan.tfplan
+          retention-days: 1
+
+  # ──────────────────────────────────────────────────────────────────────────────
+  # STAGE 2b — Deploy prod
+  # Gate: GitHub Environment "prod" — add required reviewers here.
+  # This job pauses and waits for manual approval before applying.
+  # Uses environment-scoped secret: AWS_ROLE_ARN
+  # ──────────────────────────────────────────────────────────────────────────────
+  deploy-prod:
+    name: "Deploy · prod"
+    runs-on: ubuntu-latest
+    needs: plan-prod
+    if: needs.plan-prod.outputs.has_changes == 'true'
+    environment: prod  # << add required reviewers in: Settings > Environments > prod
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}   # environment-scoped secret
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: environments/prod
+        run: terraform init
+
+      - name: Download Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: plan-prod-${{ github.sha }}
+          path: environments/prod
+
+      - name: Terraform Apply
+        working-directory: environments/prod
+        run: terraform apply -auto-approve plan.tfplan

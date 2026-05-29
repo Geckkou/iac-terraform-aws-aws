@@ -1,0 +1,29 @@
+## Terraform
+*.retry
+**/.terraform/*
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+## Plan files (contain sensitive data — never commit)
+*.tfplan
+plan_output.txt
+
+## Credentials & secrets
+*.pem
+*.key
+
+## Infracost
+.infracost
+
+## OS
+.DS_Store
