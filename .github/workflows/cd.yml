@@ -27,7 +27,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TF_VERSION: "~1.9"
+  TF_VERSION: "~1.10"
   AWS_REGION: "us-east-1"
 
 # Helper to resolve whether an environment should run.
