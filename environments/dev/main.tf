@@ -1,5 +1,5 @@
 module "eks" {
-  source = "git::https://github.com/Geckkou/iac-terraform-aws-aws.git"
+  source = "git::https://github.com/Geckkou/terraform-aws-eks.git?ref=develop"
 
   ## PROJECT CONFIGURATION
   cluster_name  = var.cluster_name

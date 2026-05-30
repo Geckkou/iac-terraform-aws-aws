@@ -30,3 +30,4 @@ plan_output.txt
 
 ## IAM trust policy files (contain AWS Account ID — never commit)
 trust-*.json
+policy-*.json
