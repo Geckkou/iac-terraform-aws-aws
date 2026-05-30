@@ -172,15 +172,30 @@ Executar **uma única vez** por conta AWS. Permite que o GitHub Actions assuma r
 
 ```bash
 aws iam create-open-id-connect-provider \
-  --url https://token.actions.githubusercontent.com \
-  --client-id-list sts.amazonaws.com \
-  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+  --url "https://token.actions.githubusercontent.com" \
+  --client-id-list 'sts.amazonaws.com'
 ```
+
+> A partir de dezembro/2024 o `--thumbprint-list` não é mais necessário — a AWS gerencia automaticamente.
 
 ### 2 — Criar as IAM Roles
 
-Criar uma role por ambiente (`eks-deploy-dev`, `eks-deploy-prod`) com a trust policy abaixo.
+Criar **uma role por context** de acordo com os jobs dos workflows. A AWS recomenda `StringEquals` com o subject exato — evitar wildcards (`*`) para reduzir a superfície de ataque.
+
 Substitua `SEU-ORG` e `SEU-REPO` pelo org e repositório do GitHub.
+
+#### Roles necessárias
+
+| Role sugerida | Usado em | Subject (`sub`) |
+|---|---|---|
+| `eks-plan-dev` | CI: plan dev (PR) | `repo:SEU-ORG/SEU-REPO:pull_request` |
+| `eks-plan-prod` | CI: plan prod (PR) | `repo:SEU-ORG/SEU-REPO:pull_request` |
+| `eks-deploy-dev` | CD: deploy dev | `repo:SEU-ORG/SEU-REPO:environment:dev` |
+| `eks-deploy-prod` | CD: deploy prod | `repo:SEU-ORG/SEU-REPO:environment:prod` |
+
+> Se preferir simplificar, as roles de plan e deploy do mesmo ambiente podem ser a mesma role — basta usar `StringLike` com `repo:SEU-ORG/SEU-REPO:*`. O trade-off é uma superfície de ataque maior.
+
+#### Trust policy (exemplo para `eks-deploy-prod`)
 
 ```json
 {
@@ -194,10 +209,8 @@ Substitua `SEU-ORG` e `SEU-REPO` pelo org e repositório do GitHub.
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {
         "StringEquals": {
-          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-        },
-        "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:SEU-ORG/SEU-REPO:*"
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub": "repo:SEU-ORG/SEU-REPO:environment:prod"
         }
       }
     }
@@ -205,24 +218,23 @@ Substitua `SEU-ORG` e `SEU-REPO` pelo org e repositório do GitHub.
 }
 ```
 
-> Para o ambiente `prod`, use um subject mais restrito:
-> `"repo:SEU-ORG/SEU-REPO:environment:prod"`
+Troque o `sub` conforme a tabela acima para cada role. O campo `aud` é sempre `sts.amazonaws.com`.
 
 ### 3 — Secrets no GitHub
 
 **Repository secrets** (`Settings > Secrets and variables > Actions`):
 
-| Secret | Valor |
-|---|---|
-| `AWS_ROLE_ARN_DEV` | ARN da role dev — usado nos jobs de **plan** no CI |
-| `AWS_ROLE_ARN_PROD` | ARN da role prod — usado nos jobs de **plan** no CI |
+| Secret | Role | Usado em |
+|---|---|---|
+| `AWS_ROLE_ARN_DEV` | `eks-plan-dev` | CI: job `plan-dev` (PR) |
+| `AWS_ROLE_ARN_PROD` | `eks-plan-prod` | CI: job `plan-prod` (PR) |
 
 **Environment secrets** (`Settings > Environments > <env> > Secrets`):
 
-| Environment | Secret | Valor |
-|---|---|---|
-| `dev` | `AWS_ROLE_ARN` | ARN da role dev — usado no **deploy** |
-| `prod` | `AWS_ROLE_ARN` | ARN da role prod — usado no **deploy** |
+| Environment | Secret | Role | Usado em |
+|---|---|---|---|
+| `dev` | `AWS_ROLE_ARN` | `eks-deploy-dev` | CD: job `deploy-dev` |
+| `prod` | `AWS_ROLE_ARN` | `eks-deploy-prod` | CD: job `deploy-prod` |
 
 ### 4 — Criar os Environments no GitHub
 

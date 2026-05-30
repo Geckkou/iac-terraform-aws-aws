@@ -27,3 +27,6 @@ plan_output.txt
 
 ## OS
 .DS_Store
+
+## IAM trust policy files (contain AWS Account ID — never commit)
+trust-*.json
